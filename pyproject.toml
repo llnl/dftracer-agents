@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dftracer-agents"
+version = "0.1.0"
+description = "OpenAI Agents SDK + MCP pipeline for DFTracer instrumentation and analysis"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "libclang>=18.1.1",
+  "libcst>=1.4.0",
+  "ipywidgets>=8.1.0",
+  "jupyter>=1.1.0",
+  "matplotlib>=3.8.0",
+  "mcp>=1.10.0",
+  "openai-agents>=0.0.14",
+  "pandas>=2.2.0",
+  "PyYAML>=6.0.1",
+  "typer>=0.12.3",
+]
+
+[project.scripts]
+dftracer-agents-mcp = "dftracer_agents.mcp_servers.server:main"
+dftracer-agents-run = "dftracer_agents.agent:main"
+dftracer-agents = "dftracer_agents.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

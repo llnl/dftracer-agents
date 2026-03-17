@@ -1,0 +1,14 @@
+# Copy this into ~/.config/goose/config.yaml and merge under `extensions`.
+
+extensions:
+  dftracer-agent:
+    name: DFTracer Agent Toolkit
+    cmd: bash
+    args:
+      - -lc
+      - "cd ${PROJECT_ROOT} && ./scripts/run_mcp_server.sh"
+    enabled: true
+    envs:
+      PROJECT_ROOT: /absolute/path/to/dftracer-agents
+    type: stdio
+    timeout: 300
