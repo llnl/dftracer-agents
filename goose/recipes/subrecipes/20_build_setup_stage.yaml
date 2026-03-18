@@ -1,0 +1,112 @@
+version: "1.0.0"
+title: "DFTracer Default Build Setup Stage"
+description: "Plan default build and install commands for the target application."
+extensions:
+  - type: builtin
+    name: developer
+    bundled: true
+    timeout: 300
+parameters:
+  - key: repo_dir
+    input_type: string
+    requirement: required
+    description: "Repository directory"
+  - key: repo_url
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Repository URL"
+  - key: repo_ref
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Repository ref"
+  - key: venv_dir
+    input_type: string
+    requirement: required
+    description: "Workspace venv prefix"
+  - key: repo_summary_json
+    input_type: string
+    requirement: optional
+    default: "[]"
+    description: "Compact repository tree summary in JSON"
+  - key: repo_attrs_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Heuristic repository attributes in JSON"
+  - key: stage_input_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Canonical stage input envelope for this stage"
+prompt: |
+  You are planning the DFTracer pipeline stage test_default_build_setup.
+
+  Inspect the repository under {{ repo_dir }}.
+
+  Repository URL: {{ repo_url }}
+  Repository Ref: {{ repo_ref }}
+  Install Prefix: {{ venv_dir }}
+  Canonical Stage Input JSON: {{ stage_input_json }}
+  Repository Tree Summary JSON: {{ repo_summary_json }}
+  Heuristic Repo Attributes JSON: {{ repo_attrs_json }}
+
+  Requirements:
+  - Use the repository summaries above as the default source of truth and inspect only a small number of key build files when needed.
+  - Look for build instructions in README, INSTALL, BUILD docs, CMakeLists.txt, configure.ac, Makefile.am, setup.py, and pyproject.toml.
+  - If build instructions are genuinely missing, set needs_docs=true and explain why.
+  - Otherwise emit complete shell commands to configure, build, and install into the workspace venv prefix.
+  - Commands must use absolute paths.
+  - Never install under /usr/local, app/install, or workspace/install.
+  - For autotools configure use --prefix={{ venv_dir }}.
+  - For CMake configure include -DCMAKE_INSTALL_PREFIX={{ venv_dir }}.
+  - For cmake --install include --prefix {{ venv_dir }}.
+  - Return stage="test_default_build_setup".
+  - Return handoff with exactly these fields for downstream stages: commands, install_prefix, needs_docs, needs_docs_reason.
+response:
+  json_schema:
+    type: object
+    properties:
+      stage:
+        type: string
+      summary:
+        type: string
+      needs_docs:
+        type: boolean
+      needs_docs_reason:
+        type: string
+      commands:
+        type: array
+        items:
+          type: string
+      notes:
+        type: array
+        items:
+          type: string
+      handoff:
+        type: object
+        properties:
+          commands:
+            type: array
+            items:
+              type: string
+          install_prefix:
+            type: string
+          needs_docs:
+            type: boolean
+          needs_docs_reason:
+            type: string
+        required:
+          - commands
+          - install_prefix
+          - needs_docs
+          - needs_docs_reason
+    required:
+      - stage
+      - summary
+      - needs_docs
+      - needs_docs_reason
+      - commands
+      - notes
+      - handoff

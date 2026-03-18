@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import MutableMapping
 from typing import Any
 from urllib.parse import urlparse
@@ -77,6 +79,10 @@ class NotebookSessionRuntime:
         self.ns["install_workspace_deps"] = self.install_workspace_deps
         self.ns["load_project_env"] = self.load_project_env
         self.ns["show_agent_env"] = self.show_agent_env
+        self.ns["run_goose_prompt"] = self.run_goose_prompt
+        self.ns["run_goose_recipe"] = self.run_goose_recipe
+        self.ns["run_goose_pipeline_stage_recipe"] = self.run_goose_pipeline_stage_recipe
+        self.ns["goose_pipeline_recipe_path"] = self.goose_pipeline_recipe_path
         self.ns["start_local_agent"] = self.start_local_agent
         self.ns["stop_local_agent"] = self.stop_local_agent
         self.ns["ask_agent"] = self.ask_agent
@@ -374,6 +380,58 @@ class NotebookSessionRuntime:
             return f"{base_url}{join_char}api-version=2025-03-01-preview"
         return base_url
 
+    def _derive_goose_openai_endpoint(self, base_url: str) -> tuple[str, str]:
+        if not base_url:
+            return "", ""
+
+        parsed = urlparse(base_url)
+        if not parsed.scheme or not parsed.netloc:
+            return "", ""
+
+        host = f"{parsed.scheme}://{parsed.netloc}"
+        path = parsed.path.strip("/")
+        if not path:
+            return host, "v1/chat/completions"
+        if path.endswith("chat/completions") or path.endswith("responses"):
+            return host, path
+        if path == "v1":
+            return host, "v1/chat/completions"
+        return host, f"{path}/chat/completions"
+
+    def _map_livai_and_goose_vars(self) -> None:
+        livai_api_key = os.environ.get("LIVAI_API_KEY", "")
+        livai_base_url = os.environ.get("LIVAI_BASE_URL", "")
+        livai_model = os.environ.get("LIVAI_MODEL", "")
+
+        if livai_api_key and not os.environ.get("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = livai_api_key
+        if livai_base_url and not os.environ.get("OPENAI_BASE_URL"):
+            os.environ["OPENAI_BASE_URL"] = livai_base_url
+        if livai_model and not os.environ.get("OPENAI_MODEL"):
+            os.environ["OPENAI_MODEL"] = livai_model
+        if os.environ.get("LIVAI_API_VERSION") and not os.environ.get("OPENAI_API_VERSION"):
+            os.environ["OPENAI_API_VERSION"] = os.environ["LIVAI_API_VERSION"]
+
+        effective_base_url = os.environ.get("OPENAI_BASE_URL") or livai_base_url
+        host, base_path = self._derive_goose_openai_endpoint(effective_base_url)
+
+        if host and not os.environ.get("OPENAI_HOST"):
+            os.environ["OPENAI_HOST"] = host
+        if base_path and not os.environ.get("OPENAI_BASE_PATH"):
+            os.environ["OPENAI_BASE_PATH"] = base_path
+
+        if not os.environ.get("GOOSE_PROVIDER"):
+            os.environ["GOOSE_PROVIDER"] = "openai"
+        if livai_model and not os.environ.get("GOOSE_MODEL"):
+            os.environ["GOOSE_MODEL"] = livai_model
+
+        if livai_api_key and not os.environ.get("GOOSE_EDITOR_API_KEY"):
+            os.environ["GOOSE_EDITOR_API_KEY"] = livai_api_key
+        if effective_base_url and not os.environ.get("GOOSE_EDITOR_HOST"):
+            os.environ["GOOSE_EDITOR_HOST"] = effective_base_url
+        if livai_model and not os.environ.get("GOOSE_EDITOR_MODEL"):
+            os.environ["GOOSE_EDITOR_MODEL"] = livai_model
+
     def load_project_env(self) -> None:
         env_file = self.project_root / ".env"
         if env_file.is_file():
@@ -387,14 +445,7 @@ class NotebookSessionRuntime:
                 if key not in os.environ and value:
                     os.environ[key] = value
 
-        if os.environ.get("LIVAI_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
-            os.environ["OPENAI_API_KEY"] = os.environ["LIVAI_API_KEY"]
-        if os.environ.get("LIVAI_BASE_URL") and not os.environ.get("OPENAI_BASE_URL"):
-            os.environ["OPENAI_BASE_URL"] = os.environ["LIVAI_BASE_URL"]
-        if os.environ.get("LIVAI_MODEL") and not os.environ.get("OPENAI_MODEL"):
-            os.environ["OPENAI_MODEL"] = os.environ["LIVAI_MODEL"]
-        if os.environ.get("LIVAI_API_VERSION") and not os.environ.get("OPENAI_API_VERSION"):
-            os.environ["OPENAI_API_VERSION"] = os.environ["LIVAI_API_VERSION"]
+        self._map_livai_and_goose_vars()
 
         base_url = os.environ.get("OPENAI_BASE_URL", "")
         api_mode = self._select_openai_api(base_url)
@@ -417,6 +468,192 @@ class NotebookSessionRuntime:
         print(f"  api-version    : {api_version}")
         print(f"  model          : {model}")
         print(f"  api key        : {self._mask_secret(os.environ.get('OPENAI_API_KEY'))}")
+
+    def _goose_launcher(self) -> pathlib.Path:
+        return self.project_root / "scripts" / "start_goose.sh"
+
+    def _goose_recipe_root(self) -> pathlib.Path:
+        return self.project_root / "goose" / "recipes"
+
+    def goose_pipeline_recipe_path(self) -> pathlib.Path:
+        return self._goose_recipe_root() / "00_dftracer_pipeline.yaml"
+
+    def _goose_extension_command(self) -> str:
+        python_bin = self.project_root / ".venv" / "bin" / "python"
+        if not python_bin.exists():
+            python_bin = pathlib.Path(sys.executable)
+        return shlex.join([str(python_bin), "-m", "dftracer_agents.mcp_servers.server"])
+
+    def _parse_goose_json_text(self, text: str) -> dict[str, Any] | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return None
+            try:
+                parsed = json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                return None
+        return self._unwrap_goose_json_payload(parsed)
+
+    def _unwrap_goose_json_payload(self, payload: Any) -> dict[str, Any] | None:
+        if isinstance(payload, dict):
+            for key in ("response", "result", "output", "final_output", "final_response", "content"):
+                nested = payload.get(key)
+                if isinstance(nested, dict):
+                    return nested
+                if isinstance(nested, str):
+                    parsed = self._parse_goose_json_text(nested)
+                    if parsed is not None:
+                        return parsed
+            return payload
+        if isinstance(payload, list):
+            for item in reversed(payload):
+                parsed = self._unwrap_goose_json_payload(item)
+                if parsed is not None:
+                    return parsed
+        if isinstance(payload, str):
+            return self._parse_goose_json_text(payload)
+        return None
+
+    def run_goose_prompt(self, prompt: str, extra_args: list[str] | None = None) -> str:
+        self.load_project_env()
+        launcher = self._goose_launcher()
+        if not launcher.exists():
+            raise RuntimeError(f"Goose launcher not found: {launcher}")
+
+        cmd = [
+            "bash",
+            str(launcher),
+            "run",
+            "--text",
+            prompt,
+            "--no-session",
+            "--quiet",
+            "--no-profile",
+            "--with-extension",
+            self._goose_extension_command(),
+        ]
+        if extra_args:
+            cmd.extend(extra_args)
+
+        result = subprocess.run(
+            cmd,
+            cwd=str(self.project_root),
+            env=os.environ.copy(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0:
+            detail = stderr or stdout or f"Goose exited with rc={result.returncode}"
+            raise RuntimeError(f"Goose prompt failed: {detail}")
+        if not stdout:
+            raise RuntimeError("Goose prompt failed: empty response")
+        return stdout
+
+    def run_goose_recipe(
+        self,
+        recipe_path: str | pathlib.Path,
+        params: dict[str, Any] | None = None,
+        extra_args: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.load_project_env()
+        launcher = self._goose_launcher()
+        if not launcher.exists():
+            raise RuntimeError(f"Goose launcher not found: {launcher}")
+
+        recipe_file = pathlib.Path(recipe_path)
+        if not recipe_file.is_absolute():
+            recipe_file = (self.project_root / recipe_file).resolve()
+        if not recipe_file.exists():
+            raise RuntimeError(f"Goose recipe not found: {recipe_file}")
+
+        cmd = [
+            "bash",
+            str(launcher),
+            "run",
+            "--recipe",
+            str(recipe_file),
+            "--no-session",
+            "--quiet",
+            "--no-profile",
+            "--output-format",
+            "json",
+            "--with-extension",
+            self._goose_extension_command(),
+        ]
+        for key, value in (params or {}).items():
+            cmd.extend(["--params", f"{key}={value}"])
+        if extra_args:
+            cmd.extend(extra_args)
+
+        result = subprocess.run(
+            cmd,
+            cwd=str(self.project_root),
+            env=os.environ.copy(),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0:
+            detail = stderr or stdout or f"Goose recipe exited with rc={result.returncode}"
+            raise RuntimeError(f"Goose recipe failed: {detail}")
+
+        payload = self._parse_goose_json_text(stdout)
+        if payload is None:
+            raise RuntimeError(f"Goose recipe returned non-JSON output: {stdout or stderr or '<empty>'}")
+        return payload
+
+    def run_goose_pipeline_stage_recipe(
+        self,
+        stage_name: str,
+        pipeline_context: str,
+        *,
+        venv_dir: str = "",
+        trace_dir: str = "",
+        post_dir: str = "",
+        compacted_trace_dir: str = "",
+        analysis_dir: str = "",
+        language: str = "",
+        repo_dir: str = "",
+    ) -> dict[str, Any]:
+        context_dir = self.project_root / ".cache" / "goose" / "pipeline_contexts"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=f"_{stage_name}.txt",
+            prefix="context_",
+            dir=context_dir,
+            delete=False,
+        ) as handle:
+            handle.write(pipeline_context)
+            context_path = pathlib.Path(handle.name)
+
+        params = {
+            "stage_name": stage_name,
+            "pipeline_context_file": str(context_path),
+            "venv_dir": venv_dir,
+            "trace_dir": trace_dir,
+            "post_dir": post_dir,
+            "compacted_trace_dir": compacted_trace_dir,
+            "analysis_dir": analysis_dir,
+            "language": language,
+            "repo_dir": repo_dir,
+        }
+        payload = self.run_goose_recipe(self.goose_pipeline_recipe_path(), params=params)
+        payload.setdefault("_context_file", str(context_path))
+        return payload
 
     async def start_local_agent(self) -> None:
         if self.app_state.get("agent") is not None:
@@ -456,6 +693,18 @@ class NotebookSessionRuntime:
         print("Agent stopped.")
 
     async def ask_agent(self, prompt: str) -> str:
+        backend = (os.environ.get("DFTRACER_AGENT_BACKEND") or "goose").strip().lower()
+        allow_fallback = (os.environ.get("DFTRACER_ALLOW_OPENAI_FALLBACK") or "1").strip().lower() not in {"0", "false", "no"}
+        if backend == "goose":
+            try:
+                return self.run_goose_prompt(prompt)
+            except Exception:
+                if not allow_fallback:
+                    raise
+
+        if self.app_state.get("agent") is None:
+            await self.start_local_agent()
+
         retries = int(os.environ.get("DFTRACER_ASK_AGENT_RETRIES", "3"))
         for attempt in range(1, retries + 1):
             agent = self.app_state.get("agent")

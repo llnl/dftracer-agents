@@ -1,0 +1,64 @@
+version: "1.0.0"
+title: "DFTracer DFAnalyzer Stage"
+description: "Plan DFAnalyzer commands for compacted DFTracer traces."
+parameters:
+  - key: compacted_trace_dir
+    input_type: string
+    requirement: required
+    description: "Compacted trace directory"
+  - key: analysis_dir
+    input_type: string
+    requirement: required
+    description: "Analysis output directory"
+  - key: stage_input_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Canonical stage input envelope for this stage"
+prompt: |
+  You are planning the DFTracer pipeline stage dfanalyzer.
+
+  Canonical Stage Input JSON: {{ stage_input_json }}
+
+  Requirements:
+  - Use the documented Python API workflow based on init_with_hydra and analyze_trace.
+  - Emit complete commands for analysis output generation.
+  - Use absolute paths.
+  - Compacted trace dir: {{ compacted_trace_dir }}.
+  - Analysis output dir: {{ analysis_dir }}.
+  - Return stage="dfanalyzer".
+  - Return handoff with exactly these downstream fields: analysis_dir, commands.
+response:
+  json_schema:
+    type: object
+    properties:
+      stage:
+        type: string
+      summary:
+        type: string
+      commands:
+        type: array
+        items:
+          type: string
+      notes:
+        type: array
+        items:
+          type: string
+      handoff:
+        type: object
+        properties:
+          analysis_dir:
+            type: string
+          commands:
+            type: array
+            items:
+              type: string
+        required:
+          - analysis_dir
+          - commands
+    required:
+      - stage
+      - summary
+      - commands
+      - notes
+      - handoff

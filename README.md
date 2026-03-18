@@ -4,6 +4,10 @@ AI agent pipeline for the DFTracer I/O tracing ecosystem, built with the
 [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) and a local MCP server.
 Pure Python — no binary install, no GLIBC requirements.
 
+Goose-native usage is supported as well: the DFTracer MCP server can be attached
+directly to a Goose session, and the repo can emit a `goose://extension?...`
+deeplink for one-click Goose extension setup.
+
 Covers the full DFTracer stack:
 
 - `dftracer` (collection and instrumentation)
@@ -43,7 +47,7 @@ chmod +x scripts/install.sh
 ./scripts/install.sh
 ```
 
-Creates `.venv`, installs `openai-agents`, `mcp`, and this package.
+Creates `.venv`, installs `openai-agents`, `mcp[cli]`, and this package.
 Userspace-only — no `sudo`, no system writes.
 
 ### 2. Configure endpoint
@@ -61,7 +65,41 @@ LIVAI_API_KEY=your_key_here
 ```
 
 `scripts/start_agent.sh` automatically maps `LIVAI_*` → `OPENAI_BASE_URL` /
-`OPENAI_API_KEY` / `OPENAI_MODEL` for the OpenAI Agents SDK.
+`OPENAI_API_KEY` / `OPENAI_MODEL` for the OpenAI Agents SDK, and also derives
+Goose-compatible `OPENAI_HOST`, `OPENAI_BASE_PATH`, `GOOSE_PROVIDER=openai`,
+and `GOOSE_MODEL` values from the same LIVAI settings.
+
+For Goose CLI directly, use `./scripts/start_goose.sh ...` so the same LIVAI
+mapping is applied before launching Goose.
+
+If you want Goose to own the MCP session directly instead of manually passing
+`--with-extension` each time:
+
+```bash
+# Print a goose:// deeplink for installing the DFTracer MCP server in Goose
+./scripts/print_goose_extension_link.sh
+
+# Start a Goose session with the DFTracer MCP server already attached
+./scripts/start_goose_session.sh
+```
+
+The Goose session path uses the local stdio MCP server entrypoint from this
+repo, so Goose can call the DFTracer MCP tools directly during an interactive
+session.
+
+To run the DFTracer Goose pipeline recipe directly from the terminal with the
+default IOR settings, use:
+
+```bash
+./scripts/run_goose_pipeline.sh
+```
+
+This invokes Goose once in recipe mode against the top-level DFTracer pipeline
+recipe, rather than looping over stages in shell.
+
+If you prefer to run the pipeline from inside an interactive Goose session,
+start [scripts/start_goose_session.sh](/usr/workspace/haridev/dftracer-agents/scripts/start_goose_session.sh)
+and drive the pipeline through the attached DFTracer MCP tools.
 
 ### 3. Start the agent
 

@@ -1,0 +1,84 @@
+version: "1.0.0"
+title: "DFTracer Default Run Stage"
+description: "Plan a minimal baseline run command for the uninstrumented application."
+extensions:
+  - type: builtin
+    name: developer
+    bundled: true
+    timeout: 300
+parameters:
+  - key: repo_dir
+    input_type: string
+    requirement: required
+    description: "Repository directory"
+  - key: venv_dir
+    input_type: string
+    requirement: required
+    description: "Workspace venv prefix"
+  - key: name
+    input_type: string
+    requirement: optional
+    default: "app"
+    description: "Application name"
+  - key: repo_summary_json
+    input_type: string
+    requirement: optional
+    default: "[]"
+    description: "Compact repository tree summary in JSON"
+  - key: repo_attrs_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Heuristic repository attributes in JSON"
+  - key: stage_input_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Canonical stage input envelope for this stage"
+prompt: |
+  You are planning the DFTracer pipeline stage test_default_run.
+
+  Inspect the repository under {{ repo_dir }}.
+
+  Preferred install prefix: {{ venv_dir }}
+  Application name hint: {{ name }}
+  Canonical Stage Input JSON: {{ stage_input_json }}
+  Repository Tree Summary JSON: {{ repo_summary_json }}
+  Heuristic Repo Attributes JSON: {{ repo_attrs_json }}
+
+  Requirements:
+  - Use the repository summaries above as the starting point so you do not need to scan the whole tree.
+  - Produce one best-effort baseline smoke-test command.
+  - Prefer binaries installed under {{ venv_dir }}/bin when possible.
+  - If a matching executable under {{ venv_dir }}/bin is not yet present, prefer likely repo-local binaries such as {{ repo_dir }}/src/{{ name }} or {{ repo_dir }}/{{ name }}.
+  - The command must be runnable as-is and use absolute paths when practical.
+  - Do not ask follow-up questions.
+  - Return stage="test_default_run".
+  - Return handoff with exactly this downstream field: run_cmd.
+response:
+  json_schema:
+    type: object
+    properties:
+      stage:
+        type: string
+      summary:
+        type: string
+      run_cmd:
+        type: string
+      notes:
+        type: array
+        items:
+          type: string
+      handoff:
+        type: object
+        properties:
+          run_cmd:
+            type: string
+        required:
+          - run_cmd
+    required:
+      - stage
+      - summary
+      - run_cmd
+      - notes
+      - handoff

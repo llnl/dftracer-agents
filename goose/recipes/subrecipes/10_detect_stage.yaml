@@ -1,0 +1,147 @@
+version: "1.0.0"
+title: "DFTracer Detect Stage"
+description: "Analyze the repository context and produce DFTracer detection results."
+extensions:
+  - type: builtin
+    name: developer
+    bundled: true
+    timeout: 300
+parameters:
+  - key: repo_dir
+    input_type: string
+    requirement: required
+    description: "Repository directory"
+  - key: repo_url
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Repository URL"
+  - key: repo_ref
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Repository ref"
+  - key: language
+    input_type: string
+    requirement: optional
+    default: "auto"
+    description: "Language hint"
+  - key: repo_summary_json
+    input_type: string
+    requirement: optional
+    default: "[]"
+    description: "Compact repository tree summary in JSON"
+  - key: repo_attrs_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Heuristic repository attributes in JSON"
+  - key: stage_input_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Canonical stage input envelope for this stage"
+prompt: |
+  You are planning the DFTracer pipeline detect stage.
+
+  Inspect the repository under {{ repo_dir }} and infer the effective DFTracer-relevant project facts.
+
+  Repository URL: {{ repo_url }}
+  Repository Ref: {{ repo_ref }}
+  Language Hint: {{ language }}
+  Canonical Stage Input JSON: {{ stage_input_json }}
+  Repository Tree Summary JSON: {{ repo_summary_json }}
+  Heuristic Repo Attributes JSON: {{ repo_attrs_json }}
+
+  Requirements:
+  - Use the repository tree summary and heuristic attributes as the first-pass input so you do not need to scan the entire repository.
+  - Determine the primary language and build system.
+  - Only inspect a small number of files under {{ repo_dir }} when the summaries above are insufficient, prioritizing README, configure.ac, CMakeLists.txt, Makefile.am, pyproject.toml, setup.py, and the most likely entrypoint sources.
+  - Detect whether MPI is present.
+  - If MPI is available even as an optional backend, plugin, transport, wrapper, or conditional build target, set uses_mpi=true.
+  - Set mpi_detection to one of: required, optional, not_detected.
+  - Detect whether HIP/ROCm is used.
+  - Recommend DFTracer build flags that should be enabled.
+  - Keep notes concrete and short.
+  - Return stage="detect".
+  - Return handoff with exactly these fields for downstream stages: language, build_system, uses_mpi, mpi_detection, uses_hip, dftracer_flags.
+response:
+  json_schema:
+    type: object
+    properties:
+      stage:
+        type: string
+      summary:
+        type: string
+      language:
+        type: string
+      build_system:
+        type: string
+      uses_mpi:
+        type: boolean
+      mpi_detection:
+        type: string
+        enum: [required, optional, not_detected]
+      uses_hip:
+        type: boolean
+      dftracer_flags:
+        type: object
+        properties:
+          DFTRACER_ENABLE_MPI:
+            type: string
+            enum: ["ON", "OFF"]
+          DFTRACER_ENABLE_HIP_TRACING:
+            type: string
+            enum: ["ON", "OFF"]
+          DFTRACER_ENABLE_DYNAMIC_DETECTION:
+            type: string
+            enum: ["ON", "OFF"]
+          DFTRACER_BUILD_PYTHON_BINDINGS:
+            type: string
+            enum: ["ON", "OFF"]
+          DFTRACER_BUILD_TYPE:
+            type: string
+        required:
+          - DFTRACER_ENABLE_MPI
+          - DFTRACER_ENABLE_HIP_TRACING
+          - DFTRACER_ENABLE_DYNAMIC_DETECTION
+          - DFTRACER_BUILD_PYTHON_BINDINGS
+          - DFTRACER_BUILD_TYPE
+      notes:
+        type: array
+        items:
+          type: string
+      handoff:
+        type: object
+        properties:
+          language:
+            type: string
+          build_system:
+            type: string
+          uses_mpi:
+            type: boolean
+          mpi_detection:
+            type: string
+            enum: [required, optional, not_detected]
+          uses_hip:
+            type: boolean
+          dftracer_flags:
+            type: object
+        required:
+          - language
+          - build_system
+          - uses_mpi
+          - mpi_detection
+          - uses_hip
+          - dftracer_flags
+    required:
+      - stage
+      - summary
+      - language
+      - build_system
+      - uses_mpi
+      - mpi_detection
+      - uses_hip
+      - dftracer_flags
+      - notes
+      - handoff

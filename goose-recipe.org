@@ -1,0 +1,920 @@
+:PROPERTIES:
+:ID: 20250120T100007
+:ROAM_REFS: goose:framework
+:END:
+#+title: Goose Recipe Framework
+#+filetags: :goose:recipe:framework:block:ai-agent
+
+
+
+
+
+Overview
+
+Goose is an open-source, extensible AI agent framework developed by Block (formerly Square). It uses a declarative "recipe" system for packaging, sharing, and reusing agent configurations.
+
+
+
+
+
+What is Goose?
+
+** Core Capabilities
+
+
+
+
+
+End-to-End Task Automation: Unlike traditional AI coding assistants, Goose can "install, execute, edit, and test with any LLM"
+
+
+
+Multi-Model Support: Works with any LLM and supports switching models mid-project
+
+
+
+Local-First Architecture: Runs entirely on the user's machine by default
+
+
+
+Cross-Platform: Available as both CLI tool and desktop application
+
+** Release Information
+
+
+
+
+
+Released: January 28, 2025
+
+
+
+Governance: Linux Foundation's Agentic AI Foundation (AAIF) as of December 9, 2025
+
+
+
+Repository: https://github.com/block/goose
+
+
+
+
+
+Recipe System
+
+** What are Recipes?
+
+Recipes are reusable Goose configurations that package up instructions and settings so the setup can be easily shared and launched by others.
+
+** File Formats
+
+
+
+
+
+~.yaml~ (recommended)
+
+
+
+~.json~
+
+** Core Schema
+
+
+
+
+
+
+
+Field
+
+
+
+Type
+
+
+
+Required
+
+
+
+Description
+
+
+
+
+
+~title~
+
+
+
+String
+
+
+
+✅
+
+
+
+Short title describing the recipe
+
+
+
+
+
+~description~
+
+
+
+String
+
+
+
+✅
+
+
+
+Detailed description of what the recipe does
+
+
+
+
+
+~instructions~
+
+
+
+String
+
+
+
+✅*
+
+
+
+Template instructions for the agent
+
+
+
+
+
+~prompt~
+
+
+
+String
+
+
+
+✅*
+
+
+
+Template prompt (required for headless mode)
+
+
+
+
+
+~version~
+
+
+
+String
+
+
+
+-
+
+
+
+Recipe format version (default: "1.0.0")
+
+
+
+
+
+~activities~
+
+
+
+Array
+
+
+
+-
+
+
+
+Clickable activity bubbles in Desktop
+
+
+
+
+
+~extensions~
+
+
+
+Array
+
+
+
+-
+
+
+
+MCP servers and extensions needed
+
+
+
+
+
+~parameters~
+
+
+
+Array
+
+
+
+-
+
+
+
+Parameter definitions for dynamic recipes
+
+
+
+
+
+~sub_recipes~
+
+
+
+Array
+
+
+
+-
+
+
+
+List of subrecipes to use
+
+
+
+
+
+~settings~
+
+
+
+Object
+
+
+
+-
+
+
+
+Model provider, temperature, etc.
+
+
+
+
+
+~response~
+
+
+
+Object
+
+
+
+-
+
+
+
+Structured output schema
+
+
+
+
+
+~retry~
+
+
+
+Object
+
+
+
+-
+
+
+
+Retry logic configuration
+
+*At least one of ~instructions~ or ~prompt~ must be provided.
+
+
+
+
+
+Sub-Recipes
+
+** Purpose
+
+Subrecipes enable:
+
+
+
+
+
+Multi-step workflows: Break complex tasks into distinct phases
+
+
+
+Reusable components: Create common tasks usable in various workflows
+
+** How They Work
+
+
+
+
+
+Main recipe registers subrecipes in ~sub_recipes~ field
+
+
+
+Goose generates a tool for each subrecipe
+
+
+
+Subrecipe executes in isolated session
+
+
+
+Returns output to main recipe
+
+** Key Characteristics
+
+
+
+
+
+Sub-recipe sessions run in isolation (no shared history/memory)
+
+
+
+Subrecipes cannot define their own subrecipes (no nesting)
+
+
+
+Can run in parallel (up to 10 concurrent workers)
+
+** Configuration
+
+#+begin_src yaml
+sub_recipes:
+
+
+
+
+
+name: "security_scan"
+path: "./subrecipes/security-analysis.yaml"
+values:
+scan_level: "comprehensive"
+sequential_when_repeated: false # Allow parallel execution
+
+#+end_src
+
+
+
+
+
+Extensions (MCP)
+
+** Model Context Protocol
+
+Goose is built on MCP, an open standard for AI agent tool integration.
+
+** Extension Types
+
+
+
+
+
+
+
+Type
+
+
+
+Description
+
+
+
+
+
+~stdio~
+
+
+
+Standard I/O client with command and arguments
+
+
+
+
+
+~builtin~
+
+
+
+Built-in extension part of bundled Goose MCP server
+
+
+
+
+
+~platform~
+
+
+
+Platform extensions running in agent process
+
+
+
+
+
+~streamable_http~
+
+
+
+Streamable HTTP client with URI endpoint
+
+
+
+
+
+~frontend~
+
+
+
+Frontend-provided tools
+
+
+
+
+
+~inline_python~
+
+
+
+Inline Python code executed using uvx
+
+** Example
+
+#+begin_src yaml
+extensions:
+
+
+
+
+
+type: stdio
+name: codesearch
+cmd: uvx
+args:
+
+
+
+
+
+mcp_codesearch@latest
+timeout: 300
+bundled: true
+
+#+end_src
+
+
+
+
+
+Parameters
+
+** Parameter Schema
+
+
+
+
+
+
+
+Field
+
+
+
+Type
+
+
+
+Required
+
+
+
+Description
+
+
+
+
+
+~key~
+
+
+
+String
+
+
+
+✅
+
+
+
+Unique identifier
+
+
+
+
+
+~input_type~
+
+
+
+String
+
+
+
+✅
+
+
+
+string, number, boolean, date, file, select
+
+
+
+
+
+~requirement~
+
+
+
+String
+
+
+
+✅
+
+
+
+required, optional, user_prompt
+
+
+
+
+
+~description~
+
+
+
+String
+
+
+
+✅
+
+
+
+Human-readable description
+
+
+
+
+
+~default~
+
+
+
+String
+
+
+
+-
+
+
+
+Default value for optional params
+
+
+
+
+
+~options~
+
+
+
+Array
+
+
+
+-
+
+
+
+Choices for select type
+
+** Template Syntax
+
+Uses Jinja-style templates: ~{{ parameter_name }}~
+
+** Example
+
+#+begin_src yaml
+parameters:
+
+
+
+
+
+key: language
+input_type: string
+requirement: required
+description: "Programming language to review"
+
+
+
+key: output_format
+input_type: select
+requirement: required
+options:
+
+
+
+
+
+json
+
+
+
+markdown
+
+
+
+csv
+
+instructions: "Review {{ language }} code and output as {{ output_format }}"
+#+end_src
+
+
+
+
+
+Execution Modes
+
+** Sequential vs Parallel
+
+
+
+
+
+
+
+Scenario
+
+
+
+Default
+
+
+
+Override
+
+
+
+
+
+Different subrecipes
+
+
+
+Sequential
+
+
+
+Add "in parallel" to prompt
+
+
+
+
+
+Same subrecipe (different params)
+
+
+
+Parallel
+
+
+
+Set ~sequential_when_repeated: true~
+
+** Parallel Execution
+
+
+
+
+
+Up to 10 concurrent workers
+
+
+
+Real-time progress monitoring in CLI
+
+
+
+Isolated worker processes
+
+
+
+
+
+Settings
+
+** Configuration
+
+#+begin_src yaml
+settings:
+goose_provider: "anthropic"
+goose_model: "claude-sonnet-4-20250514"
+temperature: 0.7
+max_turns: 100
+#+end_src
+
+** max_turns
+
+Controls execution iterations. Precedence:
+
+
+
+
+
+Subagent tool call override
+
+
+
+Recipe ~settings.max_turns~
+
+
+
+~GOOSE_SUBAGENT_MAX_TURNS~ environment variable
+
+
+
+Default (1000 for main, 25 for subagents)
+
+
+
+
+
+Template Features
+
+** Inheritance
+
+#+begin_src yaml
+{% extends "parent.yaml" %}
+{% block prompt %}Modified prompt text{% endblock %}
+#+end_src
+
+** Indent Filter
+
+For multi-line values in subrecipes:
+#+begin_src yaml
+values:
+content: |
+{{ raw_data | indent(2) }}
+#+end_src
+
+** Escaping
+
+For literal template syntax:
+#+begin_src yaml
+prompt: "This appears literally: {{'{{example_variable}}'}}"
+#+end_src
+
+
+
+
+
+Validation
+
+** Recipe-Level
+
+
+
+
+
+At least one of ~instructions~ or ~prompt~ must be present
+
+
+
+JSON response schema must be valid if specified
+
+** Parameter Validation
+
+
+
+
+
+All template variables must have parameter definitions
+
+
+
+Optional parameters must have default values
+
+
+
+File parameters cannot have default values
+
+
+
+
+
+Best Practices
+
+
+
+
+
+Single Responsibility: Each subrecipe should have one clear purpose
+
+
+
+Clear Parameters: Use descriptive names and descriptions
+
+
+
+Pre-set Fixed Values: Use ~values~ for parameters that don't change
+
+
+
+Test Independently: Verify subrecipes work alone before combining
+
+
+
+Version Control: Recipes are YAML files—commit them to git
+
+
+
+
+
+References
+
+
+
+
+
+Official Docs: https://block.github.io/goose/
+
+
+
+Recipe Reference: https://block.github.io/goose/docs/guides/recipes/recipe-reference/
+
+
+
+Subrecipes: https://block.github.io/goose/docs/guides/recipes/subrecipes/
+
+
+
+GitHub: https://github.com/block/goose
+
+
+
+
+
+Related Concepts
+
+
+
+
+
+[[id:20250120T100000][Recipe: Org-Zettelkasten-Agent (Main)]] - Example implementation
+
+
+
+[[id:20250120T100019][MCP (Model Context Protocol)]] - Extension standard
+
+
+
+[[id:20250120T100020][AI Agent Patterns]] - Architectural patterns
+
+

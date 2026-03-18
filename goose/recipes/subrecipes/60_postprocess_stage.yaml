@@ -1,0 +1,65 @@
+version: "1.0.0"
+title: "DFTracer Postprocess Stage"
+description: "Plan dftracer-split postprocessing commands for collected traces."
+parameters:
+  - key: trace_dir
+    input_type: string
+    requirement: required
+    description: "Trace directory"
+  - key: post_dir
+    input_type: string
+    requirement: required
+    description: "Postprocess directory"
+  - key: stage_input_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Canonical stage input envelope for this stage"
+prompt: |
+  You are planning the DFTracer pipeline stage postprocess.
+
+  Canonical Stage Input JSON: {{ stage_input_json }}
+
+  Requirements:
+  - Use dftracer-split as the canonical postprocessing flow.
+  - Emit complete commands to compact traces and build the index.
+  - Use absolute paths.
+  - Input traces are under {{ trace_dir }}.
+  - Postprocess outputs must be written under {{ post_dir }}.
+  - Return stage="postprocess".
+  - Return handoff with exactly these downstream fields: post_dir, compacted_trace_dir, index_dir.
+response:
+  json_schema:
+    type: object
+    properties:
+      stage:
+        type: string
+      summary:
+        type: string
+      commands:
+        type: array
+        items:
+          type: string
+      notes:
+        type: array
+        items:
+          type: string
+      handoff:
+        type: object
+        properties:
+          post_dir:
+            type: string
+          compacted_trace_dir:
+            type: string
+          index_dir:
+            type: string
+        required:
+          - post_dir
+          - compacted_trace_dir
+          - index_dir
+    required:
+      - stage
+      - summary
+      - commands
+      - notes
+      - handoff

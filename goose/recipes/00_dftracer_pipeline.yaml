@@ -1,0 +1,126 @@
+version: "1.0.0"
+title: "DFTracer Pipeline Orchestrator"
+description: "Top-level Goose recipe for planning the full DFTracer pipeline in one run."
+parameters:
+  - key: name
+    input_type: string
+    requirement: optional
+    default: "app"
+    description: "Application name"
+  - key: repo_url
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Repository URL"
+  - key: repo_ref
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Repository ref"
+  - key: venv_dir
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Workspace virtual environment directory"
+  - key: trace_dir
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Trace directory"
+  - key: post_dir
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Postprocess output directory"
+  - key: compacted_trace_dir
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Compacted trace directory"
+  - key: analysis_dir
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Analysis output directory"
+  - key: language
+    input_type: string
+    requirement: optional
+    default: "auto"
+    description: "Detected or selected source language"
+  - key: repo_dir
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Repository root directory"
+sub_recipes:
+  - name: detect_stage
+    path: "./subrecipes/10_detect_stage.yaml"
+  - name: build_setup_stage
+    path: "./subrecipes/20_build_setup_stage.yaml"
+    values:
+      venv_dir: "{{ venv_dir }}"
+  - name: default_run_stage
+    path: "./subrecipes/30_default_run_stage.yaml"
+    values:
+      venv_dir: "{{ venv_dir }}"
+  - name: annotate_stage
+    path: "./subrecipes/40_annotate_stage.yaml"
+    values:
+      language: "{{ language }}"
+      repo_dir: "{{ repo_dir }}"
+  - name: build_with_dftracer_stage
+    path: "./subrecipes/50_build_with_dftracer_stage.yaml"
+    values:
+      venv_dir: "{{ venv_dir }}"
+  - name: postprocess_stage
+    path: "./subrecipes/60_postprocess_stage.yaml"
+    values:
+      trace_dir: "{{ trace_dir }}"
+      post_dir: "{{ post_dir }}"
+  - name: dfanalyzer_stage
+    path: "./subrecipes/70_dfanalyzer_stage.yaml"
+    values:
+      compacted_trace_dir: "{{ compacted_trace_dir }}"
+      analysis_dir: "{{ analysis_dir }}"
+prompt: |
+  Plan the complete DFTracer pipeline by calling the available sub-recipes in order.
+
+  Application name: {{ name }}
+  Repository URL: {{ repo_url }}
+  Repository Ref: {{ repo_ref }}
+  Repository directory: {{ repo_dir }}
+  Language hint: {{ language }}
+  Workspace venv: {{ venv_dir }}
+  Trace dir: {{ trace_dir }}
+  Postprocess dir: {{ post_dir }}
+  Compacted trace dir: {{ compacted_trace_dir }}
+  Analysis dir: {{ analysis_dir }}
+
+  Required execution order:
+  1. Call detect_stage.
+  2. Call build_setup_stage.
+  3. Call default_run_stage.
+  4. Call annotate_stage.
+  5. Call build_with_dftracer_stage.
+  6. Call postprocess_stage.
+  7. Call dfanalyzer_stage.
+
+  Requirements:
+  - Use each sub-recipe exactly once.
+  - Preserve each sub-recipe's structured output under a stages object keyed by stage name.
+  - Keep the final response valid JSON.
+  - The final response must contain a concise summary and the per-stage outputs.
+settings:
+  temperature: 0.1
+  max_turns: 40
+response:
+  json_schema:
+    type: object
+    properties:
+      summary:
+        type: string
+      stages:
+        type: object
+    required:
+      - summary
+      - stages

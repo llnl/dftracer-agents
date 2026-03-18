@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from dftracer_agents.notebook.session import NotebookSessionRuntime
 from dftracer_agents.notebook.pipeline import NotebookPipelineRuntime
 from dftracer_agents.workspace import WorkspaceLayout
 
@@ -102,6 +103,157 @@ def make_namespace(layout: WorkspaceLayout | None) -> dict:
 
 
 class NotebookPipelineStateTests(unittest.TestCase):
+    def test_session_stage_recipe_helper_forwards_language_and_repo_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = NotebookSessionRuntime(
+                {
+                    "APP_STATE": {"logs": []},
+                    "PROJECT_ROOT": Path(tmp_dir),
+                }
+            )
+
+            captured: dict[str, object] = {}
+
+            def fake_run_goose_recipe(recipe_path, params=None, extra_args=None):
+                captured["recipe_path"] = recipe_path
+                captured["params"] = dict(params or {})
+                return {"ok": True}
+
+            runtime.run_goose_recipe = fake_run_goose_recipe  # type: ignore[method-assign]
+
+            payload = runtime.run_goose_pipeline_stage_recipe(
+                "detect",
+                "pipeline context",
+                venv_dir="/tmp/venv",
+                trace_dir="/tmp/traces",
+                post_dir="/tmp/post",
+                compacted_trace_dir="/tmp/post/compacted",
+                analysis_dir="/tmp/analysis",
+                language="cpp",
+                repo_dir="/tmp/repo",
+            )
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(captured["params"]["language"], "cpp")
+            self.assertEqual(captured["params"]["repo_dir"], "/tmp/repo")
+            self.assertEqual(captured["params"]["stage_name"], "detect")
+            self.assertIn("pipeline_context_file", captured["params"])
+
+    def test_detect_stage_recipe_updates_repo_attrs_and_optional_mpi_enables_dftracer(self) -> None:
+        runtime = NotebookPipelineRuntime(make_namespace(None))
+        runtime.ns["run_goose_pipeline_stage_recipe"] = lambda stage_name, context, **kwargs: {
+            "summary": "Detected optional MPI support",
+            "language": "cpp",
+            "build_system": "autotools",
+            "uses_mpi": True,
+            "mpi_detection": "optional",
+            "uses_hip": False,
+            "dftracer_flags": {"DFTRACER_ENABLE_MPI": "ON"},
+            "notes": ["MPI backend is optional but available"],
+        }
+
+        result = asyncio.run(runtime.run_stage("detect"))
+
+        self.assertIn("Detected optional MPI support", result)
+        self.assertTrue(runtime.app_state["repo_attrs"]["uses_mpi"])
+        self.assertEqual(runtime.app_state["repo_attrs"]["mpi_detection"], "optional")
+        self.assertTrue(runtime.app_state["repo_attrs"]["uses_mpi_optional"])
+        self.assertTrue(runtime._infer_uses_mpi())
+
+    def test_annotation_verification_accepts_string_build_patch_entries(self) -> None:
+        runtime = NotebookPipelineRuntime(make_namespace(None))
+
+        verification = runtime._verify_annotation_subagent(
+            {
+                "ok": True,
+                "annotation": {
+                    "modified": [{"file": "/tmp/source.c", "changes": ["inserted annotation"]}],
+                    "build_link_patches": {"modified": ["/tmp/CMakeLists.txt"]},
+                },
+                "patch": {"patch": "diff --git a/src.c b/src.c"},
+            }
+        )
+
+        self.assertTrue(verification["ok"])
+        self.assertEqual(verification["modified_files"], ["/tmp/source.c"])
+        self.assertEqual(verification["build_files"], ["/tmp/CMakeLists.txt"])
+
+    def test_annotate_stage_uses_goose_recipe_payload_and_records_verification(self) -> None:
+        runtime = NotebookPipelineRuntime(make_namespace(None))
+        runtime.ns["run_goose_pipeline_stage_recipe"] = lambda stage_name, context, **kwargs: {
+            "summary": "Applied Python annotations",
+            "ok": True,
+            "annotation": {
+                "modified": [{"file": "/tmp/app.py", "changes": ["inserted annotation"]}],
+                "build_link_patches": {"modified": ["/tmp/pyproject.toml"]},
+                "skipped": [],
+            },
+            "patch": {"patch": "diff --git a/app.py b/app.py"},
+            "notes": ["Used Python annotation subrecipe"],
+        }
+
+        message = asyncio.run(runtime.run_stage("annotate"))
+
+        self.assertIn("Applied Python annotations", json.dumps(runtime.pipeline_exec["annotate"]["subagents"]["annotation"]))
+        self.assertIn("/tmp/app.py", message)
+        self.assertTrue(runtime.pipeline_exec["annotate"]["subagents"]["verification"]["ok"])
+
+    def test_build_stage_recipe_populates_commands_from_goose_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            layout = make_layout(Path(tmp_dir) / "workspace")
+            runtime = NotebookPipelineRuntime(make_namespace(layout))
+            runtime.ns["run_goose_pipeline_stage_recipe"] = lambda stage_name, context, **kwargs: {
+                "summary": "Generated default build commands",
+                "needs_docs": False,
+                "needs_docs_reason": "",
+                "commands": [f"{layout.repo}/configure --prefix={layout.venv}", "make -j4"],
+                "notes": ["Autotools detected"],
+            }
+
+            result = asyncio.run(runtime.run_stage("test_default_build_setup"))
+
+            self.assertIn("Generated default build commands", result)
+            self.assertEqual(
+                runtime.pipeline_exec["test_default_build_setup"]["commands"],
+                [f"{layout.repo}/configure --prefix={layout.venv}", "make -j4"],
+            )
+
+    def test_autotools_cleanup_is_injected_for_preconfigured_source_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            layout = make_layout(Path(tmp_dir) / "workspace")
+            (layout.repo / "config.status").write_text("configured", encoding="utf-8")
+            (layout.repo / "Makefile").write_text("distclean:\n\t@true\n", encoding="utf-8")
+
+            runtime = NotebookPipelineRuntime(make_namespace(layout))
+            commands = [f"{layout.repo}/configure --prefix={layout.venv}", "make -j4"]
+
+            patched = runtime._autotools_source_cleanup_commands(commands, layout.repo)
+
+            self.assertEqual(len(patched), 3)
+            self.assertIn("make distclean", patched[0])
+            self.assertIn("rm -f config.status config.log libtool", patched[0])
+            self.assertEqual(patched[1:], commands)
+
+    def test_nonempty_trace_files_filters_zero_length_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            layout = make_layout(Path(tmp_dir) / "workspace")
+            runtime = NotebookPipelineRuntime(make_namespace(layout))
+            runtime.app_state["current_run_id"] = "run_test_trace_sizes"
+
+            trace_dir = layout.traces / "run_test_trace_sizes"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            empty_trace = trace_dir / "empty-app.pfw"
+            empty_trace.write_text("", encoding="utf-8")
+            nonempty_trace = trace_dir / "filled-app.pfw.gz"
+            nonempty_trace.write_text("trace-data", encoding="utf-8")
+
+            sizes = runtime._trace_file_sizes()
+            nonempty = runtime._nonempty_trace_files()
+
+            self.assertEqual(sizes[str(empty_trace)], 0)
+            self.assertGreater(sizes[str(nonempty_trace)], 0)
+            self.assertEqual(nonempty, [nonempty_trace])
+
     def test_traced_run_completed_with_teardown_signal_requires_summary_and_trace(self) -> None:
         runtime = NotebookPipelineRuntime(make_namespace(None))
         stdout = "\n".join(
@@ -122,6 +274,29 @@ class NotebookPipelineStateTests(unittest.TestCase):
         self.assertFalse(runtime._traced_run_completed_with_teardown_signal(0, stdout, [Path("/tmp/session-app.pfw.gz")]))
         self.assertFalse(runtime._traced_run_completed_with_teardown_signal(-11, stdout, []))
         self.assertFalse(runtime._traced_run_completed_with_teardown_signal(-11, "IOR-4.0.0\nResults:\n", [Path("/tmp/session-app.pfw.gz")]))
+
+    def test_run_with_dftracer_verification_requires_nonempty_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            layout = make_layout(Path(tmp_dir) / "workspace")
+            runtime = NotebookPipelineRuntime(make_namespace(layout))
+            runtime.app_state["current_run_id"] = "run_test_verify_trace"
+            runtime.pipeline_exec["run_with_dftracer"] = {"run_cmd": "echo test"}
+
+            trace_dir = layout.traces / "run_test_verify_trace"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            empty_trace = trace_dir / "session-empty.pfw.gz"
+            empty_trace.write_text("", encoding="utf-8")
+
+            failed = runtime._verify_stage_subagent("run_with_dftracer", stage_ok=True)
+            self.assertFalse(failed["ok"])
+            self.assertEqual(failed["nonempty_trace_files"], [])
+
+            nonempty_trace = trace_dir / "session-filled.pfw.gz"
+            nonempty_trace.write_text("trace-data", encoding="utf-8")
+
+            passed = runtime._verify_stage_subagent("run_with_dftracer", stage_ok=True)
+            self.assertTrue(passed["ok"])
+            self.assertIn(str(nonempty_trace), passed["nonempty_trace_files"])
 
     def test_pipeline_state_tracks_failures_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -1,0 +1,69 @@
+version: "1.0.0"
+title: "DFTracer Rebuild Stage"
+description: "Regenerate build commands after DFTracer annotation has been applied."
+extensions:
+  - type: builtin
+    name: developer
+    bundled: true
+    timeout: 300
+parameters:
+  - key: repo_dir
+    input_type: string
+    requirement: required
+    description: "Repository directory"
+  - key: venv_dir
+    input_type: string
+    requirement: required
+    description: "Workspace venv prefix"
+  - key: stage_input_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Canonical stage input envelope for this stage"
+prompt: |
+  You are planning the DFTracer pipeline stage build_with_dftracer.
+
+  Inspect the annotated repository under {{ repo_dir }}.
+  Canonical Stage Input JSON: {{ stage_input_json }}
+
+  Requirements:
+  - Revisit the repository build instructions after annotation.
+  - Emit configure/build/install commands that link against DFTracer and install into {{ venv_dir }}.
+  - Commands must use absolute paths.
+  - Never install under /usr/local, app/install, or workspace/install.
+  - Return stage="build_with_dftracer".
+  - Return handoff with exactly these downstream fields: commands, install_prefix.
+response:
+  json_schema:
+    type: object
+    properties:
+      stage:
+        type: string
+      summary:
+        type: string
+      commands:
+        type: array
+        items:
+          type: string
+      notes:
+        type: array
+        items:
+          type: string
+      handoff:
+        type: object
+        properties:
+          commands:
+            type: array
+            items:
+              type: string
+          install_prefix:
+            type: string
+        required:
+          - commands
+          - install_prefix
+    required:
+      - stage
+      - summary
+      - commands
+      - notes
+      - handoff

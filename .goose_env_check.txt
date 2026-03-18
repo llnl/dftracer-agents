@@ -1,0 +1,6 @@
+OPENAI_API_KEY=missing
+OPENAI_BASE_URL=missing
+OPENAI_MODEL=missing
+LIVAI_API_KEY=missing
+LIVAI_BASE_URL=missing
+LIVAI_MODEL=missing

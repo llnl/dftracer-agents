@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
-# start_agent.sh — activate the venv and launch the DFTracer AI agent REPL.
-# Accepts an optional single-shot prompt as arguments:
-#   ./scripts/start_agent.sh                          # interactive REPL
-#   ./scripts/start_agent.sh "annotate my training loop"  # single-shot
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
-PYTHON="${VENV_DIR}/bin/python"
+GOOSE_BIN="${DFTRACER_GOOSE_BIN:-${VENV_DIR}/bin/goose}"
 
-if [[ ! -x "${PYTHON}" ]]; then
-  echo "venv not found at ${VENV_DIR}. Run ./scripts/install.sh first."
+_restore_if_set() {
+  local name="$1"
+  local value="$2"
+  if [[ -n "${value}" ]]; then
+    export "${name}=${value}"
+  fi
+}
+
+if [[ ! -x "${GOOSE_BIN}" ]]; then
+  echo "goose not found at ${GOOSE_BIN}. Run ./scripts/install.sh first."
   exit 1
 fi
 
-# Load .env if present
+PRESET_LIVAI_BASE_URL="${LIVAI_BASE_URL:-}"
+PRESET_LIVAI_API_KEY="${LIVAI_API_KEY:-}"
+PRESET_LIVAI_MODEL="${LIVAI_MODEL:-}"
+PRESET_OPENAI_BASE_URL="${OPENAI_BASE_URL:-}"
+PRESET_OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+PRESET_OPENAI_MODEL="${OPENAI_MODEL:-}"
+PRESET_GOOSE_PROVIDER="${GOOSE_PROVIDER:-}"
+PRESET_GOOSE_MODEL="${GOOSE_MODEL:-}"
+
 if [[ -f "${ROOT_DIR}/.env" ]]; then
   set -a
   # shellcheck source=/dev/null
@@ -22,14 +34,28 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   set +a
 fi
 
-# Map LLNL LIVAI vars → standard OpenAI client env vars and Goose provider vars
-if [[ -n "${LIVAI_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
+_restore_if_set LIVAI_BASE_URL "${PRESET_LIVAI_BASE_URL}"
+_restore_if_set LIVAI_API_KEY "${PRESET_LIVAI_API_KEY}"
+_restore_if_set LIVAI_MODEL "${PRESET_LIVAI_MODEL}"
+_restore_if_set OPENAI_BASE_URL "${PRESET_OPENAI_BASE_URL}"
+_restore_if_set OPENAI_API_KEY "${PRESET_OPENAI_API_KEY}"
+_restore_if_set OPENAI_MODEL "${PRESET_OPENAI_MODEL}"
+_restore_if_set GOOSE_PROVIDER "${PRESET_GOOSE_PROVIDER}"
+_restore_if_set GOOSE_MODEL "${PRESET_GOOSE_MODEL}"
+
+if [[ -z "${PRESET_OPENAI_API_KEY}" && -n "${PRESET_LIVAI_API_KEY}" ]]; then
+  export OPENAI_API_KEY="${PRESET_LIVAI_API_KEY}"
+elif [[ -n "${LIVAI_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
   export OPENAI_API_KEY="${LIVAI_API_KEY}"
 fi
-if [[ -n "${LIVAI_BASE_URL:-}" && -z "${OPENAI_BASE_URL:-}" ]]; then
+if [[ -z "${PRESET_OPENAI_BASE_URL}" && -n "${PRESET_LIVAI_BASE_URL}" ]]; then
+  export OPENAI_BASE_URL="${PRESET_LIVAI_BASE_URL}"
+elif [[ -n "${LIVAI_BASE_URL:-}" && -z "${OPENAI_BASE_URL:-}" ]]; then
   export OPENAI_BASE_URL="${LIVAI_BASE_URL}"
 fi
-if [[ -n "${LIVAI_MODEL:-}" && -z "${OPENAI_MODEL:-}" ]]; then
+if [[ -z "${PRESET_OPENAI_MODEL}" && -n "${PRESET_LIVAI_MODEL}" ]]; then
+  export OPENAI_MODEL="${PRESET_LIVAI_MODEL}"
+elif [[ -n "${LIVAI_MODEL:-}" && -z "${OPENAI_MODEL:-}" ]]; then
   export OPENAI_MODEL="${LIVAI_MODEL}"
 fi
 
@@ -68,19 +94,9 @@ if [[ -n "${OPENAI_MODEL:-}" && -z "${GOOSE_EDITOR_MODEL:-}" ]]; then
   export GOOSE_EDITOR_MODEL="${OPENAI_MODEL}"
 fi
 
-# Validate required vars
 if [[ -z "${OPENAI_API_KEY:-}" ]]; then
   echo "Missing OPENAI_API_KEY (or LIVAI_API_KEY). Set it in .env."
   exit 1
 fi
-if [[ -z "${OPENAI_BASE_URL:-}" ]]; then
-  echo "Missing OPENAI_BASE_URL (or LIVAI_BASE_URL). Set it in .env."
-  exit 1
-fi
 
-# Run agent (REPL or single-shot)
-if [[ $# -gt 0 ]]; then
-  exec "${PYTHON}" -m dftracer_agents.agent "$@"
-else
-  exec "${PYTHON}" -m dftracer_agents.agent
-fi
+exec "${GOOSE_BIN}" "$@"

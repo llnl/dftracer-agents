@@ -1,0 +1,61 @@
+version: "1.0.0"
+title: "DFTracer Annotation Stage"
+description: "Route annotation to a language-specific subrecipe and return the applied patch result."
+parameters:
+  - key: language
+    input_type: string
+    requirement: optional
+    default: "auto"
+    description: "Detected or selected source language"
+  - key: repo_dir
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Repository directory"
+sub_recipes:
+  - name: annotate_c_cpp_stage
+    path: "./41_annotate_c_cpp_stage.yaml"
+    values:
+      repo_dir: "{{ repo_dir }}"
+      language: "{{ language }}"
+  - name: annotate_python_stage
+    path: "./42_annotate_python_stage.yaml"
+    values:
+      repo_dir: "{{ repo_dir }}"
+      language: "{{ language }}"
+prompt: |
+  Run the correct annotation subrecipe for the repository.
+
+  Selected language: {{ language }}
+
+  Routing rules:
+  - If the project language is python, call annotate_python_stage.
+  - If the project language is c, cpp, or auto with C/C++ sources detected, call annotate_c_cpp_stage.
+  - If the language is auto and the context mentions both Python and C/C++, prefer the dominant application language described in the context.
+
+  Call exactly one annotation subrecipe and return its structured result as the final response.
+settings:
+  temperature: 0.1
+  max_turns: 25
+response:
+  json_schema:
+    type: object
+    properties:
+      summary:
+        type: string
+      ok:
+        type: boolean
+      annotation:
+        type: object
+      patch:
+        type: object
+      notes:
+        type: array
+        items:
+          type: string
+    required:
+      - summary
+      - ok
+      - annotation
+      - patch
+      - notes

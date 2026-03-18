@@ -1,0 +1,13 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^bash -n scripts/install\\.sh$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "command": true,
+        "/^python -m compileall src/dftracer_agents/notebook/session\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

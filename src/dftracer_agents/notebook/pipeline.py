@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pathlib
@@ -13,6 +14,7 @@ from datetime import datetime
 from typing import Any
 
 from ..knowledge import layered_analysis_commands, postprocess_commands
+from ..mcp_servers.modules.environment import resolve_cmake_package_variables
 from ..workspace import WorkspaceLayout
 
 
@@ -385,6 +387,19 @@ class NotebookPipelineRuntime:
         trace_dir = self._trace_dir_for_postprocess()
         return sorted(list(trace_dir.rglob("*.pfw")) + list(trace_dir.rglob("*.pfw.gz")))
 
+    def _trace_file_sizes(self, trace_files: list[pathlib.Path] | None = None) -> dict[str, int]:
+        sizes: dict[str, int] = {}
+        for path in trace_files or self._active_trace_files():
+            try:
+                sizes[str(path)] = path.stat().st_size
+            except OSError:
+                sizes[str(path)] = -1
+        return sizes
+
+    def _nonempty_trace_files(self, trace_files: list[pathlib.Path] | None = None) -> list[pathlib.Path]:
+        sizes = self._trace_file_sizes(trace_files)
+        return [pathlib.Path(path) for path, size in sizes.items() if size > 0]
+
     def _traced_run_completed_with_teardown_signal(
         self,
         returncode: int,
@@ -401,6 +416,227 @@ class NotebookPipelineRuntime:
             "Summary of all tests:",
         ]
         return all(marker in stdout for marker in markers)
+
+    def _record_subagent(self, stage_name: str, subagent_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        exec_data = self.pipeline_exec.setdefault(stage_name, {})
+        subagents = exec_data.setdefault("subagents", {})
+        subagents[subagent_name] = payload
+        return payload
+
+    def _run_annotation_subagent(self) -> dict[str, Any]:
+        layout = self.app_state.get("workspace")
+        if not layout:
+            return {"ok": False, "error": "Workspace not prepared"}
+
+        language = self.config_value("language")
+        result = annotate_and_create_patch(
+            repo_dir=str(layout.repo),
+            language=language if language != "(not set)" else "auto",
+            patch_build_files=True,
+            dry_run=False,
+        )
+        return result
+
+    def _verify_annotation_subagent(self, annotation_result: dict[str, Any]) -> dict[str, Any]:
+        annotation = annotation_result.get("annotation", annotation_result)
+        modified = annotation.get("modified") or []
+        build_patches = (annotation.get("build_link_patches") or {}).get("modified") or []
+        patch_text = ((annotation_result.get("patch") or {}).get("patch") or "").strip()
+        normalized_modified = [self._normalize_annotation_entry(item) for item in modified]
+        normalized_build_patches = [self._normalize_annotation_entry(item) for item in build_patches]
+        ok = bool(annotation_result.get("ok")) and bool(modified or build_patches or patch_text)
+        summary = (
+            f"annotation verification {'passed' if ok else 'failed'}: "
+            f"{len(modified)} source file(s) changed, "
+            f"{len(build_patches)} build file(s) patched"
+        )
+        return {
+            "ok": ok,
+            "summary": summary,
+            "modified_files": [item.get("file", "") for item in normalized_modified],
+            "build_files": [item.get("file", "") for item in normalized_build_patches],
+            "patch_present": bool(patch_text),
+        }
+
+    def _normalize_annotation_entry(self, item: Any) -> dict[str, Any]:
+        if isinstance(item, dict):
+            return item
+        if isinstance(item, pathlib.Path):
+            return {"file": str(item)}
+        if isinstance(item, str):
+            return {"file": item}
+        return {"file": str(item), "value": item}
+
+    def _format_annotation_stage_message(
+        self,
+        annotation_result: dict[str, Any],
+        verification_result: dict[str, Any],
+    ) -> str:
+        annotation = annotation_result.get("annotation", annotation_result)
+        modified = [self._normalize_annotation_entry(item) for item in (annotation.get("modified") or [])]
+        build_patches = [
+            self._normalize_annotation_entry(item)
+            for item in ((annotation.get("build_link_patches") or {}).get("modified") or [])
+        ]
+        skipped = annotation.get("skipped") or []
+        lines = [
+            "[subagent] annotate: applied DFTracer annotations directly from the notebook runtime.",
+            f"  verification: {verification_result.get('summary', 'unknown')}",
+            f"  modified source files: {len(modified)}",
+            f"  patched build files: {len(build_patches)}",
+            f"  skipped files: {len(skipped)}",
+        ]
+        for item in modified[:5]:
+            path = item.get("file") or "<unknown>"
+            changes = ", ".join(str(change) for change in (item.get("changes") or [])[:3])
+            lines.append(f"    - {path}: {changes or 'annotations injected'}")
+        for item in build_patches[:5]:
+            path = item.get("file") or "<unknown>"
+            note = item.get("note") or item.get("status") or "link flags updated"
+            lines.append(f"    - build patch {path}: {note}")
+        return "\n".join(lines)
+
+    def _run_cmake_resolution_subagent(self) -> dict[str, Any]:
+        layout = self.app_state.get("workspace")
+        if not layout:
+            return {"ok": False, "error": "Workspace not prepared"}
+        return resolve_cmake_package_variables(
+            package_name="dftracer",
+            cmake_prefix_hint=str(layout.venv),
+        )
+
+    def _verify_cmake_resolution_subagent(self, cmake_result: dict[str, Any]) -> dict[str, Any]:
+        variables = cmake_result.get("variables") or {}
+        targets = cmake_result.get("targets") or {}
+        include_dirs = variables.get("DFTRACER_INCLUDE_DIRS") or []
+        libraries = variables.get("DFTRACER_LIBRARIES") or []
+        resolved_targets = [
+            name
+            for name, props in targets.items()
+            if props.get("INTERFACE_INCLUDE_DIRECTORIES") or props.get("INTERFACE_LINK_LIBRARIES") or props.get("IMPORTED_LOCATION_RELEASE")
+        ]
+        ok = bool(cmake_result.get("ok")) and bool(include_dirs or libraries or resolved_targets)
+        summary = (
+            f"cmake resolution {'passed' if ok else 'failed'}: "
+            f"includes={len(include_dirs) if isinstance(include_dirs, list) else int(bool(include_dirs))}, "
+            f"libraries={len(libraries) if isinstance(libraries, list) else int(bool(libraries))}, "
+            f"targets={len(resolved_targets)}"
+        )
+        return {
+            "ok": ok,
+            "summary": summary,
+            "include_dirs": include_dirs,
+            "libraries": libraries,
+            "resolved_targets": resolved_targets,
+        }
+
+    def _verification_payload(self, ok: bool, summary: str, **extra: Any) -> dict[str, Any]:
+        payload = {"ok": ok, "summary": summary}
+        payload.update(extra)
+        return payload
+
+    def _verify_stage_subagent(self, stage_name: str, stage_ok: bool) -> dict[str, Any]:
+        layout = self.app_state.get("workspace")
+        exec_data = self.pipeline_exec.get(stage_name) or {}
+
+        if stage_name == "install_dftracer":
+            if not stage_ok or not layout:
+                return self._verification_payload(False, "install verification failed: stage execution did not complete")
+            py = layout.venv / "bin" / "python"
+            result = subprocess.run(
+                [str(py), "-m", "pip", "show", "dftracer", "dftracer-analyzer"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return self._verification_payload(
+                result.returncode == 0,
+                "install verification passed: dftracer and dftracer-analyzer are present in the workspace venv"
+                if result.returncode == 0
+                else "install verification failed: dftracer package metadata is missing from the workspace venv",
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+
+        if stage_name in {"test_default_build_setup", "build_with_dftracer"}:
+            commands = exec_data.get("commands") or []
+            if not stage_ok:
+                return self._verification_payload(False, f"{stage_name} verification failed: build commands did not complete")
+            if not layout:
+                return self._verification_payload(False, f"{stage_name} verification failed: workspace not prepared")
+            prefix_hits = [command for command in commands if str(layout.venv) in command]
+            ok = bool(commands) and bool(prefix_hits)
+            return self._verification_payload(
+                ok,
+                f"{stage_name} verification {'passed' if ok else 'failed'}: "
+                f"{len(prefix_hits)}/{len(commands)} command(s) target the workspace venv prefix",
+                commands=commands,
+            )
+
+        if stage_name == "test_default_run":
+            run_cmd = (exec_data.get("run_cmd") or "").strip()
+            ok = stage_ok and bool(run_cmd) and not self._is_placeholder_dftracer_run(run_cmd)
+            return self._verification_payload(
+                ok,
+                "baseline run verification passed: cached run command executed successfully"
+                if ok
+                else "baseline run verification failed: no usable run command completed successfully",
+                run_cmd=run_cmd,
+                returncode=exec_data.get("returncode"),
+            )
+
+        if stage_name == "run_with_dftracer":
+            trace_files = self._active_trace_files()
+            size_map = self._trace_file_sizes(trace_files)
+            nonempty = [path for path, size in size_map.items() if size > 0]
+            ok = stage_ok and bool(nonempty)
+            return self._verification_payload(
+                ok,
+                "run_with_dftracer verification passed: at least one DFTracer trace file is non-empty"
+                if ok
+                else "run_with_dftracer verification failed: no non-empty DFTracer trace files were generated",
+                trace_files=list(size_map.keys()),
+                trace_sizes=size_map,
+                nonempty_trace_files=nonempty,
+            )
+
+        if stage_name == "postprocess":
+            if not layout:
+                return self._verification_payload(False, "postprocess verification failed: workspace not prepared")
+            post_dir = self._stage_output_dir() / "postprocess"
+            compacted = post_dir / "compacted"
+            index_dir = post_dir / "index"
+            compacted_files = [str(path) for path in compacted.rglob("*") if path.is_file()] if compacted.exists() else []
+            index_files = [str(path) for path in index_dir.rglob("*") if path.is_file()] if index_dir.exists() else []
+            ok = stage_ok and bool(compacted_files or index_files)
+            return self._verification_payload(
+                ok,
+                "postprocess verification passed: compacted trace artifacts were produced"
+                if ok
+                else "postprocess verification failed: compacted trace artifacts are missing",
+                compacted_files=compacted_files[:20],
+                index_files=index_files[:20],
+            )
+
+        if stage_name == "dfanalyzer":
+            analysis_dir = self._stage_output_dir() / "analysis"
+            outputs = [str(path) for path in analysis_dir.rglob("*") if path.is_file()] if analysis_dir.exists() else []
+            ok = stage_ok and bool(outputs)
+            return self._verification_payload(
+                ok,
+                "dfanalyzer verification passed: analysis output files were generated"
+                if ok
+                else "dfanalyzer verification failed: analysis output files are missing",
+                outputs=outputs[:20],
+            )
+
+        return self._verification_payload(stage_ok, f"{stage_name} verification {'passed' if stage_ok else 'failed'}")
+
+    def _finalize_stage_execution(self, stage_name: str, stage_ok: bool, out_fn: Callable[[str], None]) -> bool:
+        verification = self._verify_stage_subagent(stage_name, stage_ok)
+        self._record_subagent(stage_name, "verification", verification)
+        out_fn(f"  [verify] {verification['summary']}\n")
+        return stage_ok and bool(verification.get("ok"))
 
     def _refresh_stage_commands_for_resume(self, stage_name: str) -> None:
         if stage_name not in {"postprocess", "dfanalyzer"}:
@@ -459,6 +695,57 @@ class NotebookPipelineRuntime:
             if isinstance(value, list) and all(isinstance(x, str) for x in value):
                 return value
         return []
+
+    def _stage_recipe_payload_to_text(self, payload: dict[str, Any]) -> str:
+        summary = str(payload.get("summary") or "").strip()
+        notes = payload.get("notes") or []
+        if summary and not notes:
+            return summary
+        return json.dumps(payload, indent=2, sort_keys=True)
+
+    def _update_detect_state_from_recipe(self, payload: dict[str, Any]) -> None:
+        attrs = dict(self.app_state.get("repo_attrs") or {})
+        if "language" in payload:
+            attrs["language"] = payload.get("language")
+        if "build_system" in payload:
+            attrs["build_system"] = payload.get("build_system")
+        if "uses_mpi" in payload:
+            attrs["uses_mpi"] = bool(payload.get("uses_mpi"))
+        if "mpi_detection" in payload:
+            attrs["mpi_detection"] = payload.get("mpi_detection")
+            attrs["uses_mpi_optional"] = payload.get("mpi_detection") == "optional"
+        if "uses_hip" in payload:
+            attrs["uses_hip"] = bool(payload.get("uses_hip"))
+        self.app_state["repo_attrs"] = attrs
+
+        feedback = dict(self.app_state.get("feedback") or {})
+        build_system = payload.get("build_system")
+        if build_system and feedback.get("build_system") in {None, "auto"}:
+            feedback["build_system"] = build_system
+        self.app_state["feedback"] = feedback
+
+    def _run_goose_stage_recipe(self, stage_name: str, context: str) -> dict[str, Any]:
+        runner = self._optional_callable("run_goose_pipeline_stage_recipe")
+        if runner is None:
+            raise RuntimeError("Goose pipeline recipe runner is not installed in the notebook session")
+
+        layout = self.app_state.get("workspace")
+        post_dir = str(self._stage_output_dir() / "postprocess") if layout else ""
+        analysis_dir = str(self._stage_output_dir() / "analysis") if layout else ""
+        payload = runner(
+            stage_name,
+            context,
+            venv_dir=str(layout.venv) if layout else "",
+            trace_dir=str(self._trace_dir_for_postprocess()) if layout else "",
+            post_dir=post_dir,
+            compacted_trace_dir=str(pathlib.Path(post_dir) / "compacted") if layout else "",
+            analysis_dir=analysis_dir,
+            language=self.config_value("language"),
+            repo_dir=str(layout.repo) if layout else "",
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Goose recipe returned unexpected payload type: {type(payload).__name__}")
+        return payload
 
     def _synthesize_default_build_commands(self, layout: Any, uses_mpi: bool) -> list[str]:
         if not layout:
@@ -568,6 +855,9 @@ class NotebookPipelineRuntime:
         attrs = self.app_state.get("repo_attrs") or {}
         if bool(attrs.get("uses_mpi")):
             out_fn("  MPI inferred from detected repo attributes; enabling DFTRACER_ENABLE_MPI=ON\n")
+            return True
+        if bool(attrs.get("uses_mpi_optional")):
+            out_fn("  Optional MPI support detected in repository analysis; enabling DFTRACER_ENABLE_MPI=ON\n")
             return True
 
         detect_text = str(self.pipeline_results.get("detect", ""))
@@ -830,6 +1120,38 @@ class NotebookPipelineRuntime:
 
         return patched
 
+    def _is_autotools_configure_command(self, command: str) -> bool:
+        lowered = command.lower()
+        if "cmake" in lowered:
+            return False
+        return bool(re.search(r"(^|[\s'\"/])configure([\s'\"=]|$)", command))
+
+    def _autotools_source_cleanup_commands(
+        self,
+        commands: list[str],
+        repo_dir: pathlib.Path | None,
+    ) -> list[str]:
+        if not commands or repo_dir is None:
+            return commands
+        if not (repo_dir / "config.status").exists():
+            return commands
+        if any("distclean" in command for command in commands):
+            return commands
+        if not any(self._is_autotools_configure_command(command) for command in commands):
+            return commands
+
+        cleanup_script = textwrap.dedent(
+            """
+            if [[ -f Makefile ]]; then
+              make distclean || true
+            fi
+            rm -f config.status config.log libtool
+            rm -rf autom4te.cache
+            """
+        ).strip()
+        cleanup_cmd = f"bash -lc {shlex.quote(cleanup_script)}"
+        return [cleanup_cmd, *commands]
+
     async def run_stage(self, stage_name: str, extra_context: str = "") -> str:
         if stage_name == "install_dftracer":
             message = textwrap.dedent(
@@ -840,6 +1162,22 @@ class NotebookPipelineRuntime:
             ).strip()
             self.pipeline_results[stage_name] = message
             self.pipeline_exec[stage_name] = {}
+            return message
+
+        context = self.prompt_context()
+        if extra_context:
+            context += f"\n\n{extra_context}"
+
+        if stage_name == "annotate":
+            annotation_result = self._run_goose_stage_recipe(stage_name, context)
+            self.pipeline_exec[stage_name] = {}
+            self._record_subagent(stage_name, "annotation", annotation_result)
+            verification = self._verify_annotation_subagent(annotation_result)
+            self._record_subagent(stage_name, "verification", verification)
+            message = self._format_annotation_stage_message(annotation_result, verification)
+            self.pipeline_results[stage_name] = message
+            if not verification.get("ok"):
+                raise RuntimeError(verification.get("summary") or "annotation subagent failed verification")
             return message
 
         if stage_name == "run_with_dftracer":
@@ -866,151 +1204,35 @@ class NotebookPipelineRuntime:
             self.pipeline_results[stage_name] = message
             return message
 
-        context = self.prompt_context()
-        if extra_context:
-            context += f"\n\n{extra_context}"
-
         layout = self.app_state.get("workspace")
-        venv_dir = str(layout.venv) if layout else "(workspace not prepared)"
-        repo_dir = str(layout.repo) if layout else "(workspace not prepared)"
-        trace_dir = str(self._trace_dir_for_postprocess()) if layout else "(workspace not prepared)"
-        post_dir = str(self._stage_output_dir() / "postprocess") if layout else "./postprocess"
-        analysis_dir = str(self._stage_output_dir() / "analysis") if layout else "./analysis"
-        compacted_trace_dir = str(pathlib.Path(post_dir) / "compacted")
 
-        prompts = {
-            "detect": textwrap.dedent(
-                f"""
-                {context}
+        if stage_name == "build_with_dftracer":
+            cmake_result = self._run_cmake_resolution_subagent()
+            self.pipeline_exec[stage_name] = dict(self.pipeline_exec.get(stage_name) or {})
+            self._record_subagent(stage_name, "resolve_cmake_package_variables", cmake_result)
+            cmake_verification = self._verify_cmake_resolution_subagent(cmake_result)
+            self._record_subagent(stage_name, "resolve_cmake_package_variables_verification", cmake_verification)
+            if not cmake_verification.get("ok"):
+                raise RuntimeError(cmake_verification.get("summary") or "cmake resolution subagent failed verification")
+            context += (
+                "\n\nResolved DFTracer CMake package variables from notebook subagent:\n"
+                + json.dumps(cmake_result, indent=2)
+            )
+        recipe_stages = {"detect", "test_default_build_setup", "test_default_run", "build_with_dftracer", "postprocess", "dfanalyzer"}
+        if stage_name not in recipe_stages:
+            raise ValueError(f"Unknown stage: {stage_name!r}. Valid: {sorted(recipe_stages | {'annotate', 'install_dftracer', 'run_with_dftracer'})}")
 
-                Call detect_dftracer_profile with the detected language, MPI usage, and HIP usage.
-                Examine the source tree: identify primary language, build system, MPI/HIP usage, I/O patterns.
-                List which DFTracer feature flags should be ON or OFF for this application and explain why.
-                """
-            ).strip(),
-            "test_default_build_setup": textwrap.dedent(
-                f"""
-                {context}
-
-                Look for build instructions in: README.md, README, configure.ac, CMakeLists.txt,
-                Makefile.am, setup.py, pyproject.toml, docs/, INSTALL, BUILD.
-                Use the App documentation URL if provided above.
-
-                If you CANNOT find clear build instructions and no URL was given, respond:
-                  NEED_DOCS: <reason>
-
-                Otherwise provide step-by-step explanation, then at the very end append — on its own line —
-                a JSON array of complete shell commands (with absolute paths) to configure, build, and install
-                the default (non-DFTracer) app into the workspace venv prefix:
-                DFTRACER_EXEC: ["cmd1", "cmd2", ...]
-
-                Command requirements:
-                - NEVER install under app/install, workspace/install, or /usr/local.
-                - For autotools configure, use: --prefix={venv_dir}
-                - For cmake configure, include: -DCMAKE_INSTALL_PREFIX={venv_dir}
-                - For cmake --install, include: --prefix {venv_dir}
-                - For make install, include: prefix={venv_dir} (unless DESTDIR is explicitly required)
-
-                Source dir: {repo_dir}
-                Install prefix (must use this): {venv_dir}
-                """
-            ).strip(),
-            "test_default_run": textwrap.dedent(
-                f"""
-                {context}
-
-                Determine a minimal smoke-test run command for the default app build.
-                Prefer binaries/scripts installed under {venv_dir}/bin when applicable.
-                The workspace venv currently contains binaries like: {venv_dir}/bin/ior and {venv_dir}/bin/mdtest.
-
-                Response contract (mandatory):
-                - Do NOT ask follow-up questions.
-                - Do NOT return only analysis.
-                - You MUST emit the DFTRACER_RUN directive even if uncertain.
-                - If unsure, emit a best-effort command using {venv_dir}/bin/ior.
-
-                At the very end of your response append this line exactly:
-                DFTRACER_RUN: "full shell command to run the baseline app test"
-                """
-            ).strip(),
-            "annotate": textwrap.dedent(
-                f"""
-                {context}
-
-                Call execute_pipeline_stage with:
-                  stage='annotate'
-                  workspace_root='{str(layout.root) if layout else ''}'
-                  repo_dir='{repo_dir}'
-                  language='{self.config_value('language')}'
-                  auto_apply_annotations=true
-                  patch_build_files=true
-                  dry_run=false
-
-                Return:
-                - modified source files and what annotations were injected
-                - modified build files and link flags added
-                - any files skipped and why
-                """
-            ).strip(),
-            "build_with_dftracer": textwrap.dedent(
-                f"""
-                {context}
-
-                Revisit build docs and regenerate build commands after DFTracer annotations are applied.
-                Ensure the updated build links against DFTracer and installs the app into {venv_dir}.
-
-                At the very end append this JSON command list:
-                DFTRACER_EXEC: ["cmd1", "cmd2", ...]
-
-                Command requirements:
-                - NEVER install under app/install, workspace/install, or /usr/local.
-                - For autotools configure, use: --prefix={venv_dir}
-                - For cmake configure, include: -DCMAKE_INSTALL_PREFIX={venv_dir}
-                - For cmake --install, include: --prefix {venv_dir}
-                - For make install, include: prefix={venv_dir} (unless DESTDIR is explicitly required)
-
-                Source dir: {repo_dir}
-                Install prefix (must use this): {venv_dir}
-                """
-            ).strip(),
-            "postprocess": textwrap.dedent(
-                f"""
-                {context}
-
-                Call generate_postprocess_plan for: {trace_dir}
-                Use dftracer-split as the canonical dftracer-utils flow to compact traces and build the index.
-
-                At the very end of your response append — on its own line — a JSON array of all commands:
-                DFTRACER_EXEC: ["cmd1", "cmd2", ...]
-
-                Use absolute paths. Trace dir: {trace_dir}  Output dir: {post_dir}
-                """
-            ).strip(),
-            "dfanalyzer": textwrap.dedent(
-                f"""
-                {context}
-
-                Call generate_layered_analysis_plan for compacted traces at: {compacted_trace_dir}
-                Use the documented Python API workflow based on init_with_hydra and analyze_trace.
-
-                At the very end of your response append — on its own line — a JSON array of all commands:
-                DFTRACER_EXEC: ["cmd1", "cmd2", ...]
-
-                Use absolute paths. Compacted trace dir: {compacted_trace_dir}  Analysis output dir: {analysis_dir}
-                """
-            ).strip(),
-        }
-
-        if stage_name not in prompts:
-            raise ValueError(f"Unknown stage: {stage_name!r}. Valid: {list(prompts)}")
-
-        response = await self.ns["ask_agent"](prompts[stage_name])
+        recipe_result = self._run_goose_stage_recipe(stage_name, context)
+        response = self._stage_recipe_payload_to_text(recipe_result)
         self.pipeline_results[stage_name] = response
 
         exec_data: dict[str, Any] = {}
+        exec_data["recipe_result"] = recipe_result
+        if stage_name == "detect":
+            self._update_detect_state_from_recipe(recipe_result)
         if stage_name in {"test_default_build_setup", "build_with_dftracer", "postprocess", "dfanalyzer"}:
-            commands = self._parse_exec_tag("EXEC", response)
-            if isinstance(commands, list):
+            commands = recipe_result.get("commands")
+            if isinstance(commands, list) and all(isinstance(command, str) for command in commands):
                 exec_data["commands"] = commands
             else:
                 exec_data["commands"] = self._extract_command_list_fallback(response)
@@ -1020,8 +1242,8 @@ class NotebookPipelineRuntime:
                     uses_mpi=self._infer_uses_mpi(self._effective_config()),
                 )
         elif stage_name == "test_default_run":
-            exec_data["env"] = self._parse_exec_tag("ENV", response) or {}
-            parsed_run_cmd = (self._parse_exec_tag("RUN", response) or "").strip()
+            exec_data["env"] = recipe_result.get("env") if isinstance(recipe_result.get("env"), dict) else {}
+            parsed_run_cmd = str(recipe_result.get("run_cmd") or "").strip()
             if self._is_placeholder_dftracer_run(parsed_run_cmd):
                 fallback = self._guess_baseline_run_command()
                 if fallback:
@@ -1049,11 +1271,13 @@ class NotebookPipelineRuntime:
         exec_data = self.pipeline_exec.setdefault(stage_name, {})
 
         if stage_name == "install_dftracer":
-            return self._run_dftracer_pip_install(out_fn=out_fn)
+            ok = self._run_dftracer_pip_install(out_fn=out_fn)
+            return self._finalize_stage_execution(stage_name, ok, out_fn)
 
         if stage_name in {"test_default_build_setup", "build_with_dftracer"}:
             original_commands = exec_data.get("commands", [])
             commands = self._enforce_install_prefix_commands(original_commands, layout.venv) if layout else original_commands
+            commands = self._autotools_source_cleanup_commands(commands, layout.repo if layout else None)
             uses_mpi = self._infer_uses_mpi(self._effective_config(), out_fn=out_fn)
             commands = self._apply_mpi_exports_to_configure(commands)
             env = self._workspace_env(layout) if layout else None
@@ -1067,7 +1291,11 @@ class NotebookPipelineRuntime:
                     if before != after:
                         out_fn(f"  rewritten: {before}\n")
                         out_fn(f"        -> {after}\n")
-            return self._run_shell_commands(commands, cwd=workdir, env=env, out_fn=out_fn)
+                if len(commands) > len(original_commands):
+                    for injected in commands[: len(commands) - len(original_commands)]:
+                        out_fn(f"  injected: {injected}\n")
+            ok = self._run_shell_commands(commands, cwd=workdir, env=env, out_fn=out_fn)
+            return self._finalize_stage_execution(stage_name, ok, out_fn)
 
         if stage_name == "test_default_run":
             if not layout:
@@ -1102,8 +1330,9 @@ class NotebookPipelineRuntime:
             for line in result.stderr.strip().splitlines():
                 out_fn(f"    [stderr] {line}\n")
             ok = result.returncode == 0
+            exec_data["returncode"] = result.returncode
             out_fn("  ✓ baseline test run completed\n" if ok else f"  ✗ baseline test run failed (rc={result.returncode})\n")
-            return ok
+            return self._finalize_stage_execution(stage_name, ok, out_fn)
 
         if stage_name == "run_with_dftracer":
             if not layout:
@@ -1171,10 +1400,16 @@ class NotebookPipelineRuntime:
                 out_fn(f"    [stderr] {line}\n")
 
             trace_files = self._active_trace_files()
+            nonempty_trace_files = self._nonempty_trace_files(trace_files)
+            trace_sizes = self._trace_file_sizes(trace_files)
             soft_success = self._traced_run_completed_with_teardown_signal(result.returncode, result.stdout, trace_files)
-            ok = result.returncode == 0 or soft_success
+            run_completed = result.returncode == 0 or soft_success
+            ok = run_completed and bool(nonempty_trace_files)
             exec_data["returncode"] = result.returncode
             exec_data["soft_success"] = soft_success
+            exec_data["trace_files"] = [str(path) for path in trace_files]
+            exec_data["trace_sizes"] = trace_sizes
+            exec_data["nonempty_trace_files"] = [str(path) for path in nonempty_trace_files]
             self.pipeline_exec[stage_name] = exec_data
 
             if result.returncode == 0:
@@ -1187,8 +1422,10 @@ class NotebookPipelineRuntime:
                 out_fn(f"  ✗ app run failed (rc={result.returncode})\n")
             out_fn(f"  Trace files found: {len(trace_files)}\n")
             for path in trace_files[:5]:
-                out_fn(f"    {path}\n")
-            return ok
+                out_fn(f"    {path} ({trace_sizes.get(str(path), -1)} bytes)\n")
+            if run_completed and not nonempty_trace_files:
+                out_fn("  ✗ DFTracer run completed without generating a non-empty trace file\n")
+            return self._finalize_stage_execution(stage_name, ok, out_fn)
 
         if stage_name in {"postprocess", "dfanalyzer"}:
             commands = exec_data.get("commands", [])
@@ -1201,15 +1438,16 @@ class NotebookPipelineRuntime:
                 return False
             label = "post-processing" if stage_name == "postprocess" else "dfanalyzer"
             out_fn(f"  Running {len(commands)} {label} commands (failures are non-fatal):\n")
-            return self._run_shell_commands(
+            ok = self._run_shell_commands(
                 commands,
                 cwd=layout.artifacts if layout else None,
                 env=env,
                 out_fn=out_fn,
                 continue_on_failure=True,
             )
+            return self._finalize_stage_execution(stage_name, ok, out_fn)
 
-        return True
+        return self._finalize_stage_execution(stage_name, True, out_fn)
 
     def _reset_stage_cache(self, stage_names: list[str]) -> None:
         for stage in stage_names:
@@ -1308,6 +1546,7 @@ class NotebookPipelineRuntime:
 
         ok = True
         response = ""
+        loop = asyncio.get_running_loop()
 
         with running_path.open("w", encoding="utf-8") as stage_fp, running_alias.open("w", encoding="utf-8") as alias_fp:
             def _stage_out(msg: str) -> None:
@@ -1315,17 +1554,17 @@ class NotebookPipelineRuntime:
                 stage_fp.flush()
                 alias_fp.write(msg)
                 alias_fp.flush()
-                out_fn(msg)
+                loop.call_soon_threadsafe(out_fn, msg)
 
             _stage_out(f"\n{'=' * 60}\nStage: {stage}\nAttempt: {attempt}\n{'=' * 60}\n")
 
             try:
-                response = await self.run_stage(stage)
+                response = await asyncio.to_thread(lambda: asyncio.run(self.run_stage(stage)))
                 _stage_out(response + "\n")
                 self._write_pipeline_state()
                 if stage in self.executable_stages:
                     _stage_out(f"\n--- Executing: {stage} ---\n")
-                    ok = self.execute_stage(stage, out_fn=_stage_out)
+                    ok = await asyncio.to_thread(self.execute_stage, stage, _stage_out)
             except Exception as exc:
                 import traceback as _tb
 
@@ -1346,7 +1585,7 @@ class NotebookPipelineRuntime:
         stage_state["latest_log"] = str(final_path)
         stage_state["completed_at"] = attempt_record["completed_at"]
         self._write_pipeline_state()
-        out_fn(f"[stage-output] {final_path}\n")
+        loop.call_soon_threadsafe(out_fn, f"[stage-output] {final_path}\n")
         return ok, response, final_path
 
     async def run_pipeline(
@@ -1364,11 +1603,12 @@ class NotebookPipelineRuntime:
             ensure_workspace_prepared()
 
         stages = stage_names if stage_names is not None else self.pipeline_stages
-        self._reset_stage_cache(stages)
+        tracked_stages = stages if stage_names is None else list(dict.fromkeys([*self.pipeline_stages, *stages]))
+        self._reset_stage_cache(tracked_stages)
         self.app_state["current_run_id"] = datetime.now().strftime("run_%Y%m%d_%H%M%S")
         self.app_state["last_failed_stage"] = None
         self.app_state["last_pipeline_status"] = "running"
-        self.pipeline_state = self._init_pipeline_state(stages)
+        self.pipeline_state = self._init_pipeline_state(tracked_stages)
         self._write_pipeline_state()
         out: dict[str, str] = {}
 
@@ -1378,13 +1618,13 @@ class NotebookPipelineRuntime:
 
             ok, response, _final_path = await self._run_logged_stage(stage, idx, out_fn)
             out[stage] = response
-            self._update_pipeline_status(stages)
+            self._update_pipeline_status(tracked_stages)
             self._write_pipeline_state()
 
             if not ok:
                 break
 
-        self._update_pipeline_status(stages)
+        self._update_pipeline_status(tracked_stages)
         self._write_pipeline_state()
         return out
 
@@ -1438,7 +1678,10 @@ class NotebookPipelineRuntime:
             for stage in pending_stages:
                 self._refresh_stage_commands_for_resume(stage)
                 stage_index = stage_order.index(stage) + 1
-                ok, response, _final_path = await self._run_logged_stage(stage, stage_index, out_fn)
+                if self._can_resume_from_cached_stage(stage):
+                    ok, response, _final_path = await self._rerun_cached_failed_stage(stage, stage_index, out_fn)
+                else:
+                    ok, response, _final_path = await self._run_logged_stage(stage, stage_index, out_fn)
                 out[stage] = response
                 status = self._update_pipeline_status(stage_order)
                 self._write_pipeline_state()
@@ -1506,20 +1749,21 @@ class NotebookPipelineRuntime:
         self.pipeline_state["status"] = "running"
         self._write_pipeline_state()
 
+        loop = asyncio.get_running_loop()
         with running_path.open("w", encoding="utf-8") as stage_fp, running_alias.open("w", encoding="utf-8") as alias_fp:
             def _stage_out(msg: str) -> None:
                 stage_fp.write(msg)
                 stage_fp.flush()
                 alias_fp.write(msg)
                 alias_fp.flush()
-                out_fn(msg)
+                loop.call_soon_threadsafe(out_fn, msg)
 
             _stage_out(f"\n{'=' * 60}\nStage: {stage}\nAttempt: {attempt}\n{'=' * 60}\n")
             _stage_out("[resume] Reusing cached stage plan from pipeline_state.json; agent is not required for this retry.\n")
             if response:
                 _stage_out(response + "\n")
             _stage_out(f"\n--- Executing cached stage: {stage} ---\n")
-            ok = self.execute_stage(stage, out_fn=_stage_out)
+            ok = await asyncio.to_thread(self.execute_stage, stage, _stage_out)
 
         final_path = ok_path if ok else fail_path
         if final_path.exists():
@@ -1534,7 +1778,7 @@ class NotebookPipelineRuntime:
         stage_state["latest_log"] = str(final_path)
         stage_state["completed_at"] = attempt_record["completed_at"]
         self._write_pipeline_state()
-        out_fn(f"[stage-output] {final_path}\n")
+        loop.call_soon_threadsafe(out_fn, f"[stage-output] {final_path}\n")
         return ok, response, final_path
 
 

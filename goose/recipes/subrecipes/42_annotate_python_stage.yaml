@@ -1,0 +1,77 @@
+version: "1.0.0"
+title: "DFTracer Python Annotation Stage"
+description: "Use the DFTracer annotation MCP tool for Python source trees."
+parameters:
+  - key: repo_dir
+    input_type: string
+    requirement: required
+    description: "Repository directory"
+  - key: language
+    input_type: string
+    requirement: optional
+    default: "python"
+    description: "Language hint"
+  - key: stage_input_json
+    input_type: string
+    requirement: optional
+    default: "{}"
+    description: "Canonical stage input envelope for this stage"
+extensions:
+  - type: builtin
+    name: developer
+    bundled: true
+    timeout: 300
+prompt: |
+  Use the DFTracer MCP tools to apply source annotations for a Python application.
+
+  Canonical Stage Input JSON: {{ stage_input_json }}
+
+  Requirements from the repository tooling:
+  - Use annotate_and_create_patch.
+  - repo_dir must be {{ repo_dir }}.
+  - language must be python.
+  - patch_build_files must be true.
+  - dry_run must be false.
+  - Max files can be up to 200 for broader coverage.
+  - Return stage="annotate".
+  - Return a concise summary plus the full structured tool result.
+  - Return handoff with exactly these downstream fields: ok, language, patch_applied.
+response:
+  json_schema:
+    type: object
+    properties:
+      stage:
+        type: string
+      summary:
+        type: string
+      ok:
+        type: boolean
+      annotation:
+        type: object
+      patch:
+        type: object
+      notes:
+        type: array
+        items:
+          type: string
+      handoff:
+        type: object
+        properties:
+          ok:
+            type: boolean
+          language:
+            type: string
+          patch_applied:
+            type: boolean
+        required:
+          - ok
+          - language
+          - patch_applied
+    required:
+      - stage
+      - summary
+      - ok
+      - annotation
+      - patch
+      - notes
+      - handoff
