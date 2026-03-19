@@ -1,0 +1,21 @@
+extensions:
+  - type: platform
+    name: summon
+    display_name: Summon
+    timeout: 300
+    bundled: true
+  - type: builtin
+    name: developer
+    display_name: Developer
+    timeout: 300
+    bundled: true
+  - type: stdio
+    name: dftracer-agent
+    display_name: DFTracer Agent Toolkit
+    cmd: bash
+    args:
+      - -lc
+      - "cd ${PROJECT_ROOT} && ./scripts/run_mcp_server.sh"
+    envs:
+      PROJECT_ROOT: /home/neeraj/dftracer-agents
+    timeout: 300

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
-GOOSE_BIN="${DFTRACER_GOOSE_BIN:-/usr/bin/goose}"
+GOOSE_BIN="${DFTRACER_GOOSE_BIN:-goose}"
 if [[ ! -x "${GOOSE_BIN}" ]]; then
   GOOSE_BIN="${VENV_DIR}/bin/goose"
 fi
@@ -95,7 +95,7 @@ export PYTHONUNBUFFERED=1
 mkdir -p "${ROOT_DIR}/.cache/goose/pipeline_contexts" "${TRACE_DIR}" "${POST_DIR}" "${COMPACTED_TRACE_DIR}" "${ANALYSIS_DIR}"
 
 CONTEXT_FILE="$(mktemp "${ROOT_DIR}/.cache/goose/pipeline_contexts/terminal_pipeline_XXXXXX.txt")"
-cat > "${CONTEXT_FILE}" <<EOF
+cat >"${CONTEXT_FILE}" <<EOF
 Application Name: ${NAME}
 Repository URL: ${REPO_URL}
 Repository Ref: ${REPO_REF}
@@ -122,12 +122,8 @@ echo "[goose-pipeline] stage_timeout_seconds: ${STAGE_TIMEOUT_SECONDS}" >&2
 
 cmd=(
   "${GOOSE_BIN}" run
-  --with-builtin summon
   --recipe "${RECIPE_PATH}"
   --no-session
-  --no-profile
-  --output-format json
-  --with-extension "${MCP_CMD}"
   --params "name=${NAME}"
   --params "repo_url=${REPO_URL}"
   --params "repo_ref=${REPO_REF}"
@@ -142,7 +138,8 @@ cmd=(
 
 echo "[goose-pipeline] command: ${cmd[*]}" >&2
 if command -v timeout >/dev/null 2>&1; then
-  exec timeout "${STAGE_TIMEOUT_SECONDS}" "${cmd[@]}" <<< "${RUN_TEXT}"
+  exec timeout "${STAGE_TIMEOUT_SECONDS}" "${cmd[@]}" <<<"${RUN_TEXT}"
 else
-  exec "${cmd[@]}" <<< "${RUN_TEXT}"
+  exec "${cmd[@]}" <<<"${RUN_TEXT}"
 fi
+
