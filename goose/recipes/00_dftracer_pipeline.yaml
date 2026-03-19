@@ -1,3 +1,4 @@
+
 version: "1.0.0"
 title: "DFTracer Pipeline Orchestrator"
 description: "Top-level Goose recipe for planning the full DFTracer pipeline in one run."
@@ -110,6 +111,7 @@ prompt: |
   - Preserve each sub-recipe's structured output under a stages object keyed by stage name.
   - Keep the final response valid JSON.
   - The final response must contain a concise summary and the per-stage outputs.
+
 settings:
   temperature: 0.1
   max_turns: 40
@@ -124,3 +126,5 @@ response:
     required:
       - summary
       - stages
+
+{% extends "base-extensions.yaml" %}

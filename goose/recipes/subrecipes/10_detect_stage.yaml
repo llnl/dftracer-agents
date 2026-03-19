@@ -1,11 +1,7 @@
+
 version: "1.0.0"
 title: "DFTracer Detect Stage"
 description: "Analyze the repository context and produce DFTracer detection results."
-extensions:
-  - type: builtin
-    name: developer
-    bundled: true
-    timeout: 300
 parameters:
   - key: repo_dir
     input_type: string
@@ -145,3 +141,4 @@ response:
       - dftracer_flags
       - notes
       - handoff
+{% extends "../base-extensions.yaml" %}

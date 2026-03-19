@@ -75,3 +75,4 @@ response:
       - patch
       - notes
       - handoff
+{% extends "../base-extensions.yaml" %}

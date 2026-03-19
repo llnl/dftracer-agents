@@ -82,3 +82,4 @@ response:
       - run_cmd
       - notes
       - handoff
+{% extends "../base-extensions.yaml" %}

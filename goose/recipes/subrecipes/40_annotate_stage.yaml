@@ -59,3 +59,4 @@ response:
       - annotation
       - patch
       - notes
+{% extends "../base-extensions.yaml" %}
